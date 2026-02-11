@@ -14,6 +14,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::io;
 
 use futures_util::TryFutureExt;
 use hyper::header::FORWARDED;
@@ -394,6 +395,35 @@ impl OutboundConnection {
         Ok((upgraded, baggage))
     }
 
+    /// Race TCP connections to all candidate addresses.
+    /// Returns the first successfully connected TcpStream and the winning address.
+    /// Cancels all remaining attempts once a winner is found.
+    /// If all fail, returns the last error.
+    async fn race_connect(
+        candidates: &[SocketAddr],
+        socket_factory: &(dyn proxy::SocketFactory + Send + Sync),
+    ) -> io::Result<(TcpStream, SocketAddr)> {
+        use futures_util::stream::FuturesUnordered;
+        use futures_util::StreamExt;
+
+        let mut futs = FuturesUnordered::new();
+        for &addr in candidates {
+            futs.push(async move {
+                let result = super::freebind_connect(None, addr, socket_factory).await;
+                (result, addr)
+            });
+        }
+
+        let mut last_err = io::Error::new(io::ErrorKind::ConnectionRefused, "no candidates");
+        while let Some((result, addr)) = futs.next().await {
+            match result {
+                Ok(stream) => return Ok((stream, addr)),
+                Err(e) => last_err = e,
+            }
+        }
+        Err(last_err)
+    }
+
     async fn proxy_to_tcp(
         &mut self,
         stream: TcpStream,
@@ -403,12 +433,22 @@ impl OutboundConnection {
         let connection_stats = Box::new(connection_stats_builder.build());
 
         let res = (async {
-            let outbound = super::freebind_connect(
-                None, // No need to spoof source IP on outbound
-                req.actual_destination,
-                self.pi.socket_factory.as_ref(),
-            )
-            .await?;
+            let outbound = if !req.race_candidates.is_empty() {
+                let (stream, winner) = Self::race_connect(
+                    &req.race_candidates,
+                    self.pi.socket_factory.as_ref(),
+                )
+                .await?;
+                debug!(%winner, candidates=req.race_candidates.len(), "race_connect winner");
+                stream
+            } else {
+                super::freebind_connect(
+                    None, // No need to spoof source IP on outbound
+                    req.actual_destination,
+                    self.pi.socket_factory.as_ref(),
+                )
+                .await?
+            };
 
             // Proxying data between downstream and upstream
             copy::copy_bidirectional(
@@ -512,6 +552,7 @@ impl OutboundConnection {
                 // the configuration. So for the final destination credentials
                 // (final_sans) we use the upstream workload credentials.
                 final_sans: upstream.service_sans(),
+                race_candidates: vec![],
             })
         } else {
             // Do not try to send cross-network traffic without network gateway.
@@ -574,6 +615,7 @@ impl OutboundConnection {
                     actual_destination,
                     upstream_sans,
                     final_sans: vec![],
+                    race_candidates: vec![],
                 });
             }
             // this was service addressed but we did not find a waypoint
@@ -613,6 +655,7 @@ impl OutboundConnection {
                 actual_destination: target,
                 upstream_sans: vec![],
                 final_sans: vec![],
+                race_candidates: vec![],
             });
         };
 
@@ -677,6 +720,7 @@ impl OutboundConnection {
                     actual_destination,
                     upstream_sans,
                     final_sans: vec![],
+                    race_candidates: vec![],
                 });
             }
             // Workload doesn't have a waypoint; send directly
@@ -704,6 +748,23 @@ impl OutboundConnection {
         // For case no waypoint for both side and direct to remote node proxy
         let (upstream_sans, final_sans) = (us.workload_and_services_san(), vec![]);
         debug!("built request to workload");
+        
+        // Check if we should use connection racing
+        let race_candidates = if let Some(ref svc) = service {
+            if let Some(ref lb) = svc.load_balancer {
+                if lb.connect_strategy == crate::state::service::ConnectStrategy::FirstHealthyRace {
+                    // Get all healthy endpoints for racing
+                    state.read().get_all_endpoints(&source_workload, svc, target.port())
+                } else {
+                    vec![]
+                }
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        };
+        
         Ok(Request {
             protocol: OutboundProtocol::from(us.workload.protocol),
             source: source_workload,
@@ -713,6 +774,7 @@ impl OutboundConnection {
             actual_destination,
             upstream_sans,
             final_sans,
+            race_candidates,
         })
     }
 }
@@ -760,6 +822,10 @@ struct Request {
     // This field only matters if we need to know both the identity of the next hop, as well as the
     // final hop (currently, this is only double HBONE).
     final_sans: Vec<Identity>,
+
+    /// When `ConnectStrategy::FirstHealthyRace`, contains all candidate upstream
+    /// addresses to race connections to. Empty for default strategy.
+    race_candidates: Vec<SocketAddr>,
 }
 
 #[cfg(test)]

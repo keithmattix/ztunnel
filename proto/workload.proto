@@ -157,6 +157,15 @@ message LoadBalancing {
     // Include all endpoints, even if they are unhealthy.
     ALLOW_ALL = 1;
   }
+  enum ConnectStrategy {
+    // Standard behavior: load-balance to a single endpoint and connect.
+    DEFAULT = 0;
+    // Race TCP connections to all healthy endpoints in parallel.
+    // The first successful upstream handshake wins; remaining attempts are cancelled.
+    // Useful for services where the client uses happy-eyeballs / connection-racing
+    // and only a subset of endpoints may be reachable at any given time.
+    FIRST_HEALTHY_RACE = 1;
+  }
 
   // routing_preference defines what scopes we want to keep traffic within.
   // The `mode` determines how these routing preferences are handled
@@ -165,6 +174,8 @@ message LoadBalancing {
   Mode mode = 2;
   // health_policy defines how we should filter endpoints
   HealthPolicy health_policy = 3;
+  // connect_strategy defines how to establish connections to endpoints
+  ConnectStrategy connect_strategy = 4;
 }
 
 // Workload represents a workload - an endpoint (or collection behind a hostname).

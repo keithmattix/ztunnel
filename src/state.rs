@@ -477,6 +477,57 @@ impl ProxyState {
             .ok()
             .cloned()
     }
+
+    /// Returns all healthy endpoint addresses for the given service and port.
+    /// Used by `ConnectStrategy::FirstHealthyRace` to race connections to all endpoints.
+    /// Applies the same filtering logic as load_balance (health policy, network, address availability).
+    pub fn get_all_endpoints(
+        &self,
+        src: &Workload,
+        svc: &Service,
+        svc_port: u16,
+    ) -> Vec<SocketAddr> {
+        let Some(target_port) = svc.ports.get(&svc_port).copied() else {
+            debug!("service {} does not have port {}", svc.hostname, svc_port);
+            return vec![];
+        };
+
+        svc.endpoints
+            .iter()
+            .filter_map(|ep| {
+                let wl = self.workloads.find_uid(&ep.workload_uid)?;
+
+                let in_network = wl.network == src.network;
+                let has_network_gateway = wl.network_gateway.is_some();
+                let has_address = !wl.workload_ips.is_empty() || !wl.hostname.is_empty();
+                if !has_address {
+                    // Workload has no IP. We can only reach it via a network gateway
+                    if in_network || !has_network_gateway {
+                        return None;
+                    }
+                }
+
+                // Check port exists on endpoint
+                if target_port == 0 && !ep.port.contains_key(&svc_port) {
+                    trace!(
+                        "filter endpoint {}, it does not have service port {}",
+                        ep.workload_uid, svc_port
+                    );
+                    return None;
+                }
+
+                // Get the actual workload port (use target_port or endpoint override)
+                let workload_port = if target_port != 0 {
+                    target_port
+                } else {
+                    *ep.port.get(&svc_port)?
+                };
+
+                // Get workload IP address
+                wl.workload_ips.first().map(|ip| SocketAddr::new(*ip, workload_port))
+            })
+            .collect()
+    }
 }
 
 /// Wrapper around [ProxyState] that provides additional methods for requesting information

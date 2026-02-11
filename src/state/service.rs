@@ -153,6 +153,13 @@ pub enum LoadBalancerHealthPolicy {
     AllowAll,
 }
 
+#[derive(Default, Debug, Hash, Eq, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub enum ConnectStrategy {
+    #[default]
+    Default,
+    FirstHealthyRace,
+}
+
 impl From<xds::istio::workload::load_balancing::HealthPolicy> for LoadBalancerHealthPolicy {
     fn from(value: xds::istio::workload::load_balancing::HealthPolicy) -> Self {
         match value {
@@ -197,6 +204,7 @@ pub struct LoadBalancer {
     pub routing_preferences: Vec<LoadBalancerScopes>,
     pub mode: LoadBalancerMode,
     pub health_policy: LoadBalancerHealthPolicy,
+    pub connect_strategy: ConnectStrategy,
 }
 
 impl From<xds::istio::workload::IpFamilies> for Option<IpFamily> {
@@ -312,6 +320,14 @@ impl TryFrom<&XdsService> for Service {
                     lb.health_policy,
                 )?
                 .into(),
+                connect_strategy: match xds::istio::workload::load_balancing::ConnectStrategy::try_from(
+                    lb.connect_strategy,
+                ) {
+                    Ok(xds::istio::workload::load_balancing::ConnectStrategy::FirstHealthyRace) => {
+                        ConnectStrategy::FirstHealthyRace
+                    }
+                    _ => ConnectStrategy::Default,
+                },
             })
         } else {
             None
