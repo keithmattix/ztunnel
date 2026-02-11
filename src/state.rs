@@ -626,6 +626,7 @@ impl DemandProxyState {
         src_workload: &Workload,
         original_target_address: SocketAddr,
         ip_family_restriction: Option<IpFamily>,
+        svc: Option<&Service>,
     ) -> Result<Option<IpAddr>, Error> {
         // If the user requested the pod by a specific IP, use that directly.
         if dst_workload
@@ -665,6 +666,7 @@ impl DemandProxyState {
             dst_workload,
             src_workload,
             original_target_address,
+            svc,
         ))
         .await?;
         Ok(Some(ip))
@@ -675,6 +677,7 @@ impl DemandProxyState {
         workload: &Workload,
         src_workload: &Workload,
         original_target_address: SocketAddr,
+        svc: Option<&Service>,
     ) -> Result<IpAddr, Error> {
         let labels = OnDemandDnsLabels::new()
             .with_destination(workload)
@@ -684,7 +687,7 @@ impl DemandProxyState {
             .on_demand_dns
             .get_or_create(&labels)
             .inc();
-        self.resolve_on_demand_dns(workload, original_target_address)
+        self.resolve_on_demand_dns(workload, original_target_address, svc)
             .await
     }
 
@@ -692,6 +695,7 @@ impl DemandProxyState {
         &self,
         workload: &Workload,
         original_target_address: SocketAddr,
+        svc: Option<&Service>,
     ) -> Result<IpAddr, Error> {
         let workload_uid = workload.uid.clone();
         let hostname = workload.hostname.clone();
@@ -711,13 +715,32 @@ impl DemandProxyState {
             .record_iter()
             .filter_map(|record| record.data().ip_addr())
             .partition(|record| record.is_ipv6() == original_target_address.is_ipv6());
-        // Randomly pick an IP, prefer to match the IP family of the downstream request.
-        // Without this, we run into trouble in pure v4 or pure v6 environments.
-        matching
-            .into_iter()
-            .choose(&mut rand::rng())
-            .or_else(|| unmatching.into_iter().choose(&mut rand::rng()))
-            .ok_or_else(|| Error::EmptyResolvedAddresses(workload_uid.to_string()))
+        
+        // Check DNS resolution mode from service
+        let dns_resolution_mode = svc
+            .and_then(|s| s.load_balancer.as_ref())
+            .map(|lb| &lb.dns_resolution)
+            .unwrap_or(&service::DnsResolution::Automatic);
+        
+        match dns_resolution_mode {
+            service::DnsResolution::Single => {
+                // Return only a single address - pick randomly from matching, or unmatching if no matches
+                matching
+                    .into_iter()
+                    .choose(&mut rand::rng())
+                    .or_else(|| unmatching.into_iter().choose(&mut rand::rng()))
+                    .ok_or_else(|| Error::EmptyResolvedAddresses(workload_uid.to_string()))
+            }
+            service::DnsResolution::Automatic => {
+                // Maintain existing behavior - randomly pick an IP, prefer to match the IP family of the downstream request
+                // Without this, we run into trouble in pure v4 or pure v6 environments.
+                matching
+                    .into_iter()
+                    .choose(&mut rand::rng())
+                    .or_else(|| unmatching.into_iter().choose(&mut rand::rng()))
+                    .ok_or_else(|| Error::EmptyResolvedAddresses(workload_uid.to_string()))
+            }
+        }
     }
 
     // same as fetch_workload, but if the caller knows the workload is enroute already,
@@ -833,6 +856,7 @@ impl DemandProxyState {
                 source_workload,
                 original_target_address,
                 ip_family_restriction,
+                svc.as_deref(),
             )
             .await?; // if we can't load balance just return the error
         let res = Upstream {
@@ -1828,6 +1852,7 @@ mod tests {
                     LoadBalancerScopes::Zone,
                 ],
                 health_policy: LoadBalancerHealthPolicy::OnlyHealthy,
+                dns_resolution: service::DnsResolution::Automatic,
             }),
             ports: HashMap::from([(80u16, 80u16)]),
             ..test_helpers::mock_default_service()
@@ -1842,6 +1867,7 @@ mod tests {
                     LoadBalancerScopes::Zone,
                 ],
                 health_policy: LoadBalancerHealthPolicy::OnlyHealthy,
+                dns_resolution: service::DnsResolution::Automatic,
             }),
             ports: HashMap::from([(80u16, 80u16)]),
             ..test_helpers::mock_default_service()

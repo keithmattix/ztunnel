@@ -166,6 +166,26 @@ impl From<xds::istio::workload::load_balancing::HealthPolicy> for LoadBalancerHe
     }
 }
 
+#[derive(Default, Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+pub enum DnsResolution {
+    #[default]
+    Automatic,
+    Single,
+}
+
+impl From<xds::istio::workload::load_balancing::DnsResolution> for DnsResolution {
+    fn from(value: xds::istio::workload::load_balancing::DnsResolution) -> Self {
+        match value {
+            xds::istio::workload::load_balancing::DnsResolution::Automatic => {
+                DnsResolution::Automatic
+            }
+            xds::istio::workload::load_balancing::DnsResolution::Single => {
+                DnsResolution::Single
+            }
+        }
+    }
+}
+
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 pub enum LoadBalancerScopes {
     Region,
@@ -197,6 +217,7 @@ pub struct LoadBalancer {
     pub routing_preferences: Vec<LoadBalancerScopes>,
     pub mode: LoadBalancerMode,
     pub health_policy: LoadBalancerHealthPolicy,
+    pub dns_resolution: DnsResolution,
 }
 
 impl From<xds::istio::workload::IpFamilies> for Option<IpFamily> {
@@ -310,6 +331,10 @@ impl TryFrom<&XdsService> for Service {
                 mode: xds::istio::workload::load_balancing::Mode::try_from(lb.mode)?.into(),
                 health_policy: xds::istio::workload::load_balancing::HealthPolicy::try_from(
                     lb.health_policy,
+                )?
+                .into(),
+                dns_resolution: xds::istio::workload::load_balancing::DnsResolution::try_from(
+                    lb.dns_resolution,
                 )?
                 .into(),
             })

@@ -158,6 +158,16 @@ message LoadBalancing {
     ALLOW_ALL = 1;
   }
 
+  enum DnsResolution {
+    // AUTOMATIC (default) - Uses all addresses returned by DNS resolution,
+    // maintaining the "first successful connection wins" heuristic when applicable.
+    AUTOMATIC = 0;
+    // SINGLE - Returns only a single address from DNS resolution.
+    // This is useful for service discovery clients that are incompatible with
+    // multiple connection attempts, as it ensures only one address is selected.
+    SINGLE = 1;
+  }
+
   // routing_preference defines what scopes we want to keep traffic within.
   // The `mode` determines how these routing preferences are handled
   repeated Scope routing_preference = 1;
@@ -165,6 +175,8 @@ message LoadBalancing {
   Mode mode = 2;
   // health_policy defines how we should filter endpoints
   HealthPolicy health_policy = 3;
+  // dns_resolution defines how DNS resolution should be performed for services
+  DnsResolution dns_resolution = 4;
 }
 
 // Workload represents a workload - an endpoint (or collection behind a hostname).
