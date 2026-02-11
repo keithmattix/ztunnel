@@ -722,17 +722,14 @@ impl DemandProxyState {
             .map(|lb| &lb.dns_resolution)
             .unwrap_or(&service::DnsResolution::Automatic);
         
+        // Both modes currently return a single randomly-selected IP.
+        // SINGLE mode explicitly guarantees only one address is returned for compatibility with
+        // DNS-based service discovery clients that cannot handle multiple addresses.
+        // AUTOMATIC mode currently has the same behavior but may be enhanced in the future
+        // to support "first successful connection wins" with multiple connection attempts.
         match dns_resolution_mode {
-            service::DnsResolution::Single => {
-                // Return only a single address - pick randomly from matching, or unmatching if no matches
-                matching
-                    .into_iter()
-                    .choose(&mut rand::rng())
-                    .or_else(|| unmatching.into_iter().choose(&mut rand::rng()))
-                    .ok_or_else(|| Error::EmptyResolvedAddresses(workload_uid.to_string()))
-            }
-            service::DnsResolution::Automatic => {
-                // Maintain existing behavior - randomly pick an IP, prefer to match the IP family of the downstream request
+            service::DnsResolution::Single | service::DnsResolution::Automatic => {
+                // Randomly pick an IP, prefer to match the IP family of the downstream request.
                 // Without this, we run into trouble in pure v4 or pure v6 environments.
                 matching
                     .into_iter()
